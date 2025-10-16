@@ -12,7 +12,7 @@ pip install -r requirements.txt
 
 The model we propose works on input dataset of phylogenetic trees, organized into patients.
 The dataset must be saved in a `.txt` file, with an appropriate format.
-To see the format required by our model, take as examples the `breast_cancer.txt` and `AML.txt` files we provide inside the `data` directory.
+To see the format required by our model, take as examples the `breast_cancer.txt` and `AML.txt` files we provide inside the `data\cancer_progression` directory.
 
 # Train the Model
 
@@ -23,7 +23,7 @@ For usage instructions, run `python3 train_tumor_model.py -h`.
 For instance, to train the model on the breast cancer dataset used in the experiments with standard optional parameters, run:
 ```
 cd src &&
-python3 train_tumor_model.py -i ../data/breast_cancer.txt -o ../weights/weights.pth
+python3 train_tumor_model.py -i ../data/cancer_progression/breast_cancer.txt -o ../weights/weights.pth
 ```
 
 ## Hyper Parameters Tuning
@@ -35,7 +35,7 @@ For usage instructions, run `python3 tune_tumor_model.py -h`.
 As an example, to perform a hyper parameter search for the model on the breast cancer dataset used in the experiments, run:
 ```
 cd src &&
-python3 tune_tumor_model.py -i ../data/breast_cancer.txt -o ../weights/opt/weights.pth --save_best_params
+python3 tune_tumor_model.py -i ../data/cancer_progression/breast_cancer.txt -o ../weights/opt/weights.pth --save_best_params
 ```
 
 # Compute Embeddings
