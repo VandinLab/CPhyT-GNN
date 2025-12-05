@@ -13,6 +13,9 @@ pip install -r requirements.txt
 The model we propose works on input dataset of phylogenetic trees, organized into patients.
 The dataset must be saved in a `.txt` file, with an appropriate format.
 To see the format required by our model, take as examples the `breast_cancer.txt` and `AML.txt` files we provide inside the `data\cancer_progression` directory.
+Our methods supports both the acquisition of alterations and their losses.
+To denote the loss of an alteration, it is sufficient to denote it with a label different from the label denoting its acquisition.
+The model then automatically encodes acquisitions and losses.
 
 # Train the Model
 
