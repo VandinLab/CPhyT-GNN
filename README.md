@@ -95,13 +95,13 @@ For usage instructions, run `python3 pre_process_data_cancer_progression.py -h`,
 For instance to pre-process, convert and split the `breastCancer.npy` dataset, run:
 ```
 cd src &&
-python3 pre_process_data_cancer_progression.py -d ../data/cancer_progression/breastCancer.npy
+python3 pre_process_data_cancer_progression.py -d ../data/cancer_progression/breastCancer.npy -r 27
 ```
 Remind that in pur experiments we added the `--gene_level_analysis` flag for the AML dataset, but not for the breast cancer dataset.
 Therefore, to pre-process, convert and split the `AML.npy` dataset, run:
 ```
 cd src &&
-python3 pre_process_data_cancer_progression.py -i ../data/cancer_progression/AML.npy --gene_level_analysis --max_tree_length 10
+python3 pre_process_data_cancer_progression.py -i ../data/cancer_progression/AML.npy -r 27 --gene_level_analysis --max_tree_length 10
 ```
 
 ## Run Cancer Progression Experiments
@@ -121,12 +121,12 @@ Therefore, we added the option `--no_tuning` so to avoid hyper parameters tuning
 As an example, given all the required data for the breast cancer dataset inside the folder `./results/cancer_progression_modeling/breastCancer/random_seed_27/pre_processed_data`, it is possible to run the experiment with:
 ```
 cd src &&
-python3 cancer_progression_experiments.py -i ../results/cancer_progression_modeling/breastCancer/random_seed_27/pre_processed_data -d 64 --max_tree_length 9 --infinite_sites --no_tuning
+python3 cancer_progression_experiments.py -i ../results/cancer_progression_modeling/breastCancer/random_seed_27/pre_processed_data -d 64 -r 27 --max_tree_length 9 --infinite_sites --no_tuning -f 100
 ```
 For the AML dataset with all required data in the folder `./results/cancer_progression_modeling/AML/random_seed_27/pre_processed_data`:
 ```
 cd src &&
-python3 cancer_progression_experiments.py -i ../results/cancer_progression_modeling/AML/random_seed_27/pre_processed_data -d 32 --gamma 2 --max_tree_length 10 --no_tuning --no_RECAP
+python3 cancer_progression_experiments.py -i ../results/cancer_progression_modeling/AML/random_seed_27/pre_processed_data -d 16 -r 27 --gamma 2 --max_tree_length 10 --no_tuning --no_RECAP --no_RECAP_f --no_GNN_f --no_random_f
 ```
 
 ## Compare Methods
@@ -144,7 +144,7 @@ python3 compare_methods_cancer_progression.py -i ../results/cancer_progression_m
 For the AML dataset, run:
 ```
 cd src &&
-python3 compare_methods_cancer_progression.py -i ../results/cancer_progression_modeling/AML -m Random CloMu_based oncotree2vec -p ../plots/cancer_progression/AML
+python3 compare_methods_cancer_progression.py -i ../results/cancer_progression_modeling/AML -m Tree_distances Tree_distances_filtered Random CloMu_based oncotree2vec -p ../plots/cancer_progression/AML
 ```
 
 # Survival
@@ -219,9 +219,9 @@ to pre-process the breast cancer data for survival that we provide in the `data`
 
 #### Run Survival Time Prediction Experiments
 
-The script `survival_prediction.py` trains and evaluates the three methods we consider for survival time prediction: Survival SVM on baseline features, Survival SVM on unsupervised GNN-based features and supervised GNN-based model.
-The three methods are trained on the same training set and evaluated on the same test set.
-The script has several option that can be enabled, including the exclusion of the desired method, making the experiment run only on a subset of them.
+The script `survival_prediction.py` trains and evaluates different methods for survival time prediction.
+All methods are trained on the same training set and evaluated on the same test set.
+The script has several options that can be enabled, including the exclusion of any desired method, making the experiment run only on a subset of them.
 As usual, refer to `python3 survival_prediction.py -h` for further information.
 
 As an example, all the three methods can be trained on a training set and evaluated on a test set stored in the directory `results/survival/survival_prediction/breastCancer/random_seed_27/pre_processed_data` using the command:
@@ -232,8 +232,8 @@ python3 survival_prediction.py -i ../results/survival/survival_prediction/breast
 
 #### Compare Survival Methods
 
-When some repetitions of the survival time prediction experiment have produced the results, it is possible to compare the considered methods among the three proposed across all experiment repetitions using the script `compare_methods_survival.py` (`python3 compare_methods_survival.py -h` for usage information).
-The script gathers all `methods_evaluation.csv` files produces by different experiment runs and produces a faceted plot comparing the considered survival methods.
+When some repetitions of the survival time prediction experiment have produced the results, it is possible to compare the considered methods across all experiment repetitions using the script `compare_methods_survival.py` (`python3 compare_methods_survival.py -h` for usage information).
+The script gathers all `methods_evaluation.csv` files produces by different experiment runs and produces a faceted plot comparing the survival methods considered in the experiments.
 
 For instance, if the results are stored in the directory `results/survival/survival_prediction/breastCancer`, then it is possible to run:
 ```
