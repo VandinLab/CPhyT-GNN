@@ -9,6 +9,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "2"
 
 import argparse
 import json
+import copy
 from functools import partial
 import numpy as np
 import pandas as pd
@@ -303,6 +304,8 @@ def baseline_embeddings_experiment(
         test_phylogenies_path,
         train_clinical_data,
         test_clinical_data,
+        embedding_function,
+        predictor_name,
         event,
         event_time,
         random_seed,
@@ -319,6 +322,8 @@ def baseline_embeddings_experiment(
     - test_phylogenies_path: path to the file with test phylogenetic trees.
     - train_clinical_data: DataFrame containing training clinical data.
     - test_clinical_data: DataFrame containing test clinical data.
+    - embedding_function: function to compute the baseline embeddings.
+    - predictor_name: name of the predictor to be used.
     - event: name of the column with binary values indicating if death occurred.
     - event_time: name of the column with survival time.
     - random_seed: random seed for reproducibility.
@@ -335,11 +340,12 @@ def baseline_embeddings_experiment(
     print('Computing baseline embeddings...')
 
     # load training and test phylogenetic trees and compute binary feature vectors for training and test patients
-    train_embeddings, test_embeddings = Survival_Features.get_binary_feature_vectors(
+    train_embeddings, test_embeddings = Survival_Features.get_baseline_feature_vectors(
         train_phylogenies_path,
         test_phylogenies_path,
         rd_seed=random_seed,
         min_label_occurrences=min_label_occurrences,
+        encoding_function=embedding_function
     )
 
     # convert data in a format suitable for applying an SSVM
@@ -367,16 +373,15 @@ def baseline_embeddings_experiment(
     )
 
     # print information
-    print('Training an SSVM with best found hyper parameters on training baseline embeddings...')
+    print(f'Training an SSVM with best found hyper parameters on training {predictor_name} embeddings...')
 
     # train the predictor on the training set
     predictor.fit(X_train, y_train)
 
     # print information
-    print('Evaluating on the test set the SSVM trained on baseline embeddings...')
+    print(f'Evaluating on the test set the SSVM trained on {predictor_name} embeddings...')
 
     # evaluate the predictor on the test set
-    predictor_name = 'Baseline SSVM'
     test_evaluation = Survival_Prediction.evaluate_ssvm(
         predictor_name,
         predictor,
@@ -386,6 +391,219 @@ def baseline_embeddings_experiment(
         experiment_id=random_seed,
         regression=False
     )
+
+    return test_evaluation
+
+def oncotree2vec_embeddings_experiment(
+        embeddings_path,
+        train_sorted_keys,
+        test_sorted_keys,
+        train_clinical_data,
+        test_clinical_data,
+        predictor_name,
+        event,
+        event_time,
+        random_seed,
+        hyper_parameters_ssvm,
+        cv_folds,
+        max_n_cores
+    ):
+    """
+    Trains an SSVM on oncotree2vec embeddings trained on both training and test data and evaluates the method on the test set.
+
+    Parameters:
+    - embeddings_path: path to the file with oncotree2vec embeddings learnt on both training and test data.
+    - train_sorted_keys: sorted list of patient ids in the training set.
+    - test_sorted_keys: sorted list of patient ids in the test set.
+    - train_clinical_data: DataFrame containing training clinical data.
+    - test_clinical_data: DataFrame containing test clinical data.
+    - predictor_name: name of the predictor to be used.
+    - event: name of the column with binary values indicating if death occurred.
+    - event_time: name of the column with survival time.
+    - random_seed: random seed for reproducibility.
+    - hyper_parameters_ssvm: dictionary containing the hyperparameters for the SSVM.
+    - cv_folds: number of folds for cross-validation.
+    - max_n_cores: maximum number of CPU cores for PyTorch.
+
+    Returns:
+    - test_evaluation: DataFrame containing the evaluation scores on the test set.
+    """
+
+    # print information
+    print('Loading oncotree2vec embeddings...')
+
+    # load the oncotree2vec embeddings learnt on both training and test data
+    all_embeddings = pd.read_csv(embeddings_path)
+
+    # extract train and test embeddings using the input patient ids
+    train_embeddings = all_embeddings[all_embeddings['Patient_ID'].isin(train_sorted_keys)]
+    test_embeddings = all_embeddings[all_embeddings['Patient_ID'].isin(test_sorted_keys)]
+    train_embeddings = train_embeddings.sort_values(by='Patient_ID').reset_index(drop=True)
+    test_embeddings = test_embeddings.sort_values(by='Patient_ID').reset_index(drop=True)
+
+    # convert data in a format suitable for applying an SSVM
+    X_train, y_train, X_test, y_test = prepare_data_for_SSVM(
+        train_embeddings,
+        test_embeddings,
+        train_clinical_data,
+        test_clinical_data,
+        event,
+        event_time
+    )
+
+    # print information
+    print('Tuning the hyper parameters of an SSVM on training oncotree2vec embeddings...')
+
+    # train the SSVM on training embeddings
+    predictor = FastSurvivalSVM()
+    predictor = Survival_Prediction.train_predictor(
+        predictor,
+        X_train,
+        y_train,
+        hyper_parameters_ssvm,
+        cv_folds=cv_folds,
+        n_jobs=max_n_cores
+    )
+
+    # print information
+    print(f'Training an SSVM with best found hyper parameters on training oncotree2vec embeddings...')
+
+    # train the predictor on the training set
+    predictor.fit(X_train, y_train)
+
+    # print information
+    print(f'Evaluating on the test set the SSVM trained on oncotree2vec embeddings...')
+
+    # evaluate the predictor on the test set
+    test_evaluation = Survival_Prediction.evaluate_ssvm(
+        predictor_name,
+        predictor,
+        X_test,
+        y_train,
+        y_test,
+        experiment_id=random_seed,
+        regression=False
+    )
+
+    return test_evaluation
+
+def clustering_embeddings_experiment(
+        train_phylogenies_path,
+        test_phylogenies_path,
+        train_clinical_data,
+        test_clinical_data,
+        embedding_function,
+        predictor_name,
+        event,
+        event_time,
+        random_seed,
+        min_label_occurrences,
+        hyper_parameters_ssvm,
+        cv_folds,
+        max_n_cores,
+        gamma,
+        k_values,
+        device
+    ):
+    """
+    Trains an SSVM on clustering-based embeddings and evaluates the method on the test set.
+
+    Parameters:
+    - train_phylogenies_path: path to the file with training phylogenetic trees.
+    - test_phylogenies_path: path to the file with test phylogenetic trees.
+    - train_clinical_data: DataFrame containing training clinical data.
+    - test_clinical_data: DataFrame containing test clinical data.
+    - embedding_function: function to compute the baseline embeddings.
+    - predictor_name: name of the predictor to be used.
+    - event: name of the column with binary values indicating if death occurred.
+    - event_time: name of the column with survival time.
+    - random_seed: random seed for reproducibility.
+    - min_label_occurrences: minimum number of occurrences of a mutation in the input dataset to be considered.
+    - hyper_parameters_ssvm: dictionary containing the hyperparameters for the SSVM.
+    - cv_folds: number of folds for cross-validation.
+    - max_n_cores: maximum number of CPU cores for PyTorch.
+    - gamma: multiplicative parameter for the radius of the ball used to filter out outliers.
+    - k_values: list of clustering sizes.
+    - device: device to use for tensor operations.
+
+    Returns:
+    - test_evaluation: DataFrame containing the evaluation scores on the test set.
+    """
+
+    # print information
+    print('Computing clustering-based embeddings...')
+
+    # load training and test phylogenetic trees and compute binary feature vectors for training and test patients
+    k_train_embeddings, k_test_embeddings = Survival_Features.get_clustering_feature_vectors(
+        train_phylogenies_path,
+        test_phylogenies_path,
+        gamma,
+        k_values,
+        rd_seed=random_seed,
+        min_label_occurrences=min_label_occurrences,
+        encoding_function=embedding_function,
+        device=device
+    )
+
+    # initialize the dataframe to store the evaluation scores on the test set for all clustering sizes k
+    test_evaluation = pd.DataFrame()
+
+    # make an experiment for each value of k
+    for k in k_values:
+
+        # print information
+        print(f'Embeddings computed with clustering size k={k}')
+
+        # extract train and test embeddings for the current value of k
+        train_embeddings = k_train_embeddings[k]
+        test_embeddings = k_test_embeddings[k]
+
+        # convert data in a format suitable for applying an SSVM
+        X_train, y_train, X_test, y_test = prepare_data_for_SSVM(
+            train_embeddings,
+            test_embeddings,
+            train_clinical_data,
+            test_clinical_data,
+            event,
+            event_time
+        )
+
+        # print information
+        print('Tuning the hyper parameters of an SSVM on training baseline embeddings...')
+
+        # train the SSVM on training embeddings
+        predictor = FastSurvivalSVM()
+        predictor = Survival_Prediction.train_predictor(
+            predictor,
+            X_train,
+            y_train,
+            hyper_parameters_ssvm,
+            cv_folds=cv_folds,
+            n_jobs=max_n_cores
+        )
+
+        # print information
+        print(f'Training an SSVM with best found hyper parameters on training {predictor_name}_{k} embeddings...')
+
+        # train the predictor on the training set
+        predictor.fit(X_train, y_train)
+
+        # print information
+        print(f'Evaluating on the test set the SSVM trained on {predictor_name}_{k} embeddings...')
+
+        # evaluate the predictor on the test set
+        curr_test_evaluation = Survival_Prediction.evaluate_ssvm(
+            f'{predictor_name}_{k}',
+            predictor,
+            X_test,
+            y_train,
+            y_test,
+            experiment_id=random_seed,
+            regression=False
+        )
+
+        # append the current test evaluation to the dataframe with all test evaluations
+        test_evaluation = pd.concat([test_evaluation, curr_test_evaluation], ignore_index=True)
 
     return test_evaluation
 
@@ -485,15 +703,15 @@ def unsupervised_GNN_experiment(
             'h_1': 64,
             'h_2': 64,
             'embedding_dim': 32,
-            'dropout_prob_1': 0.3,
-            'dropout_prob_2': 0.3,
+            'dropout_prob_1': 0.0,
+            'dropout_prob_2': 0.0,
             'batch_normalization': True,
-            'batch_size': 16,
+            'batch_size': 64,
             'weight_decay': 1e-4,
             'loss_fn': 'MAE_loss',
             'optimizer': 'Adam',
             'lr': 1e-3,
-            'epochs': 50
+            'epochs': 20
         }
 
     # number of labels that appear in the training set
@@ -601,6 +819,181 @@ def unsupervised_GNN_experiment(
 
     return test_evaluation
 
+def unsupervised_GNN_experiment_complete(
+        train_sorted_keys,
+        test_sorted_keys,
+        train_data,
+        test_data,
+        train_clinical_data,
+        test_clinical_data,
+        event,
+        event_time,
+        hyper_parameters_ssvm,
+        output_dir,
+        node_encoding_type,
+        random_seed,
+        cv_folds,
+        max_n_cores,
+        device,
+        save_plot,
+        verbose
+    ):
+    """
+    Trains our GNN-based unsupervised model on both training and test data to compute embeddings, trains an SSVM on the computed embeddings, and evaluates the method on the test set.
+
+    Parameters:
+    - train_phylogenies_path: path to the file with training phylogenetic trees.
+    - train_data: TumorDataset object containing training data.
+    - test_data: TumorDataset object containing test data.
+    - train_clinical_data: DataFrame containing training clinical data.
+    - test_clinical_data: DataFrame containing test clinical data.
+    - event: name of the column with binary values indicating if death occurred.
+    - event_time: name of the column with survival time.
+    - hyper_parameters_ssvm: dictionary containing the hyperparameters for the SSVM.
+    - output_dir: path to the directory where to save the output files.
+    - node_encoding_type: type of node encoding to be used.
+    - random_seed: random seed for reproducibility.
+    - cv_folds: number of folds for cross-validation.
+    - max_n_cores: maximum number of CPU cores for PyTorch.
+    - device: device to use for tensor operations.
+    - save_plot: boolean indicating if the training plot should be saved.
+    - verbose: boolean indicating if training information has to be printed.
+
+    Returns:
+    - test_evaluation: DataFrame containing the evaluation scores on the test set.
+    """
+
+    # print information
+    print('Training unsupervised GNN on both training and test data to compute embeddings...')
+
+    # merge training and test data
+    complete_data = copy.deepcopy(train_data)
+    complete_data.dataset.extend(copy.deepcopy(test_data).dataset)
+
+    # set the hyper parameters to default values
+    hyperparameters_unsupervised_GNN = {
+        'h_1': 64,
+        'h_2': 64,
+        'embedding_dim': 32,
+        'dropout_prob_1': 0.0,
+        'dropout_prob_2': 0.0,
+        'batch_normalization': False,
+        'batch_size': 64,
+        'weight_decay': 0,
+        'loss_fn': 'MAE_loss',
+        'optimizer': 'Adam',
+        'lr': 1e-3,
+        'epochs': 20
+    }
+
+    # number of labels that appear in the dataset
+    n_labels = len(complete_data.node_labels())
+
+    # create a model instance
+    model = TumorGraphGNN(
+        n_node_labels=n_labels,
+        h_1=hyperparameters_unsupervised_GNN['h_1'],
+        h_2=hyperparameters_unsupervised_GNN['h_2'],
+        embedding_dim=hyperparameters_unsupervised_GNN['embedding_dim'],
+        dropout_prob_1=hyperparameters_unsupervised_GNN['dropout_prob_1'],
+        dropout_prob_2=hyperparameters_unsupervised_GNN['dropout_prob_2'],
+        batch_normalization=hyperparameters_unsupervised_GNN['batch_normalization'],
+        device=device
+    )
+
+    # create the TorchTumorDataset for the dataset
+    complete_torch_data = TorchTumorDataset(complete_data, node_encoding_type=node_encoding_type)
+
+    # compute the tensor with the distances between all pairs of graphs in the dataset
+    complete_distances = GraphDistances.compute_distances(Utils.flatten_list_of_lists(complete_data.to_dataset_DiGraphs()), GraphDistances.ancestor_descendant_dist).to(device)
+
+    # path where to save the weights of the trained model
+    unsupervised_GNN_weights = os.path.join(output_dir, 'unsupervised_GNN_complete_weights.pth')
+
+    # if required, save the training plot
+    plot_save = None
+    if save_plot:
+        plot_save = os.path.join(output_dir, 'unsupervised_GNN_complete_training_plot.jpg')
+
+    # train the model instance on the training set
+    TrainerTumorModel.train(
+        model,
+        complete_torch_data,
+        complete_distances,
+        loss_fn=Utils.select_loss(hyperparameters_unsupervised_GNN['loss_fn']),
+        optimizer=Utils.select_optimizer(hyperparameters_unsupervised_GNN['optimizer']),
+        weight_decay=hyperparameters_unsupervised_GNN['weight_decay'],
+        batch_size=hyperparameters_unsupervised_GNN['batch_size'],
+        val_data=None,
+        val_graph_distances=None,
+        plot_save=plot_save,
+        verbose=verbose,
+        epochs=hyperparameters_unsupervised_GNN['epochs'],
+        lr=hyperparameters_unsupervised_GNN['lr'],
+        early_stopping_tolerance=None,
+        save_model=unsupervised_GNN_weights,
+        device=device
+    )
+
+    # print information
+    print('Computing unsupervised GNN-based embeddings on both training and test data...')
+
+    # convert the training set into a TorchTumorDataset
+    train_torch_data = TorchTumorDataset(train_data, node_encoding_type=node_encoding_type, known_labels_mapping=complete_torch_data.node_labels_mapping)
+
+    # convert the test set into a TorchTumorDataset
+    test_torch_data = TorchTumorDataset(test_data, node_encoding_type=node_encoding_type, known_labels_mapping=complete_torch_data.node_labels_mapping)
+
+    # compute the embeddings for the training and test datasets using the trained model
+    train_embeddings, test_embeddings = Survival_Features.get_embeddings(model, train_torch_data, test_torch_data, train_sorted_keys, test_sorted_keys, device=device)
+
+    # convert data in a format suitable for applying an SSVM
+    X_train, y_train, X_test, y_test = prepare_data_for_SSVM(
+        train_embeddings,
+        test_embeddings,
+        train_clinical_data,
+        test_clinical_data,
+        event,
+        event_time
+    )
+
+    # print information
+    print('Tuning the hyper parameters of an SSVM on training GNN-based embeddings...')
+
+    # train the SSVM on training embeddings
+    predictor = FastSurvivalSVM()
+    predictor = Survival_Prediction.train_predictor(
+        predictor,
+        X_train,
+        y_train,
+        hyper_parameters_ssvm,
+        cv_folds=cv_folds,
+        n_jobs=max_n_cores
+    )
+
+    # print information
+    print('Training an SSVM with best found hyper parameters on training GNN-based embeddings...')
+
+    # train the predictor on the training set
+    predictor.fit(X_train, y_train)
+
+    # print information
+    print('Evaluating on the test set the SSVM trained on GNN-based embeddings...')
+
+    # evaluate the predictor on the test set
+    predictor_name = 'GNN Complete SSVM'
+    test_evaluation = Survival_Prediction.evaluate_ssvm(
+        predictor_name,
+        predictor,
+        X_test,
+        y_train,
+        y_test,
+        experiment_id=random_seed,
+        regression=False
+    )
+
+    return test_evaluation
+
 def supervised_GNN_experiment(
         train_phylogenies_path,
         train_clinical_data_path,
@@ -695,13 +1088,13 @@ def supervised_GNN_experiment(
             'dropout_prob_3': 0.3,
             'batch_normalization': True,
             'node_encoding_type': 'clone',
-            'batch_size': 16,
+            'batch_size': 64,
             'weight_decay': 1e-4,
             'loss_fn': 'SquaredMarginRankingLoss',
             'margin': 1.0,
             'optimizer': 'Adam',
             'lr': 1e-3,
-            'epochs': 50
+            'epochs': 20
         }
 
     # number of labels that appear in the training set
@@ -847,9 +1240,18 @@ def parse_args():
     required.add_argument('-o', '--output_dir', type=str, required=True, help='Path to the directory where to save the output files')
 
     # optional arguments
-    parser.add_argument('--no_baseline', action='store_true', help='If set, the baseline Survival Support Vector Machine on binary feature vectors is not considered')
+    parser.add_argument('--no_alteration_baseline', action='store_true', help='If set, the baseline Survival Support Vector Machine on binary feature vectors representing presence or absence of alterations is not considered')
+    parser.add_argument('--no_clone_baseline', action='store_true', help='If set, the baseline Survival Support Vector Machine on feature vectors representing the number of clones with each alteration is not considered')
+    parser.add_argument('--no_concat_baseline', action='store_true', help='If set, the baseline Survival Support Vector Machine on the concatenation of alteration and clone-based features is not considered')
+    parser.add_argument('--no_tree_cluster_baseline', action='store_true', help='If set, the baseline Survival Support Vector Machine on tree distances cluster-based features is not considered')
+    parser.add_argument('--gamma', type=float, default=1, help='Multiplicative parameter for the radius of the ball used to filter out outliers in the computation of clustering-based features')
+    parser.add_argument('--k_values', type=int, nargs='+', default=[2, 3, 4], help='List of clustering sizes to be considered in the computation of clustering-based features')
     parser.add_argument('--no_supervised_GNN', action='store_true', help='If set, the supervised GNN-based model to predict survival time is not considered')
     parser.add_argument('--no_unsupervised_GNN', action='store_true', help='If set, the Survival Support Vector Machine on unsupervised GNN-based embeddings is not considered')
+    parser.add_argument('--no_unsupervised_GNN_complete', action='store_true', help='If set, the Survival Support Vector Machine on unsupervised GNN-based embeddings trained on both training and test graphs is not considered')
+    parser.add_argument('--no_oncotree2vec', action='store_true', help='If set, the Survival Support Vector Machine on OncoTree-based features is not considered')
+    parser.add_argument('--oncotree2vec_embeddings_path', type=str, default='../results/survival/survival_prediction/breastCancer/oncotree2vec/oncotree2vec_embeddings.csv', help='Path to the file with oncotree2vec embeddings learnt on both training and test data.' \
+    'The file must be a CSV with column "Patient_ID" with the patient identifiers and the other columns with the embedding dimensions.')
     parser.add_argument('--no_tuning', action='store_true', help='If set, the hyper parameters tuning is not performed for the GNN-based models')
     parser.add_argument('--device', type=str, default='cpu', help='Device to use: "cuda", "cpu" or "mps"')
     parser.add_argument('--max_n_cores', type=int, default=4, help='Max number of CPU cores for PyTorch')
@@ -915,17 +1317,22 @@ if __name__ == '__main__':
     # initialize the dataframe that will contain the evaluation scores on the test set for all methods
     test_evaluation = pd.DataFrame()
 
-    # ------------------------------------------------------ SSVM ON BASELINE FEATURES ------------------------------------------------------
+    # ------------------------------------------------------ SSVM ON ALTERATION BASELINE FEATURES ------------------------------------------------------
 
     # consider the baseline model, if not excluded
-    if not args.no_baseline:
+    if not args.no_alteration_baseline:
+
+        # print some information
+        print('Evaluating baseline SSVM on binary alteration-based features...')
 
         # train an SSVM on baseline embeddings and evaluate the method on the test set
-        test_evaluation_baseline = baseline_embeddings_experiment(
+        test_evaluation_alteration_baseline = baseline_embeddings_experiment(
             train_phylogenies_path,
             test_phylogenies_path,
             train_clinical_data,
             test_clinical_data,
+            Survival_Features.binary_patients_encoding,
+            'Alteration SSVM',
             args.event,
             args.event_time,
             args.random_seed,
@@ -936,7 +1343,94 @@ if __name__ == '__main__':
         )
 
         # concatenate the evaluation scores of the baseline model to the dataframe with the evaluation scores of all methods
-        test_evaluation = pd.concat([test_evaluation, test_evaluation_baseline], ignore_index=True)
+        test_evaluation = pd.concat([test_evaluation, test_evaluation_alteration_baseline], ignore_index=True)
+    
+    # ------------------------------------------------------ SSVM ON CLONE BASELINE FEATURES ------------------------------------------------------
+
+    # consider the baseline model, if not excluded
+    if not args.no_clone_baseline:
+
+        # print some information
+        print('Evaluating baseline SSVM on clone-based features...')
+
+        # train an SSVM on baseline embeddings and evaluate the method on the test set
+        test_evaluation_clone_baseline = baseline_embeddings_experiment(
+            train_phylogenies_path,
+            test_phylogenies_path,
+            train_clinical_data,
+            test_clinical_data,
+            Survival_Features.clone_patients_encoding,
+            'Clone SSVM',
+            args.event,
+            args.event_time,
+            args.random_seed,
+            args.min_label_occurrences,
+            hyper_parameters_ssvm,
+            args.cv_folds,
+            args.max_n_cores
+        )
+
+        # concatenate the evaluation scores of the baseline model to the dataframe with the evaluation scores of all methods
+        test_evaluation = pd.concat([test_evaluation, test_evaluation_clone_baseline], ignore_index=True)
+
+    # ------------------------------------------------------ SSVM ON CONCATENATION OF ALTERATION AND CLONE BASELINE FEATURES ------------------------------------------------------
+
+    # consider the baseline model, if not excluded
+    if not args.no_concat_baseline:
+
+        # print some information
+        print('Evaluating baseline SSVM on the concatenation of alteration and clone-based features...')
+
+        # train an SSVM on baseline embeddings and evaluate the method on the test set
+        test_evaluation_concat_baseline = baseline_embeddings_experiment(
+            train_phylogenies_path,
+            test_phylogenies_path,
+            train_clinical_data,
+            test_clinical_data,
+            Survival_Features.concat_patients_encoding,
+            'Concat SSVM',
+            args.event,
+            args.event_time,
+            args.random_seed,
+            args.min_label_occurrences,
+            hyper_parameters_ssvm,
+            args.cv_folds,
+            args.max_n_cores
+        )
+
+        # concatenate the evaluation scores of the baseline model to the dataframe with the evaluation scores of all methods
+        test_evaluation = pd.concat([test_evaluation, test_evaluation_concat_baseline], ignore_index=True)
+
+    # ------------------------------------------------------ SSVM ON TREE DISTANCES CLUSTER-BASED FEATURES ------------------------------------------------------
+
+    # consider the tree distances cluster-based features, if not excluded
+    if not args.no_tree_cluster_baseline:
+        
+        # print some information
+        print('Evaluating baseline SSVM on the features based on tree distances clustering...')
+
+        # train an SSVM on baseline embeddings and evaluate the method on the test set
+        test_evaluation_tree_cluster_baseline = clustering_embeddings_experiment(
+            train_phylogenies_path,
+            test_phylogenies_path,
+            train_clinical_data,
+            test_clinical_data,
+            Survival_Features.tree_cluster_patients_encoding,
+            'Tree Cluster SSVM',
+            args.event,
+            args.event_time,
+            args.random_seed,
+            args.min_label_occurrences,
+            hyper_parameters_ssvm,
+            args.cv_folds,
+            args.max_n_cores,
+            args.gamma,
+            args.k_values,
+            device
+        )
+
+        # concatenate the evaluation scores of the baseline model to the dataframe with the evaluation scores of all methods
+        test_evaluation = pd.concat([test_evaluation, test_evaluation_tree_cluster_baseline], ignore_index=True)
 
     # ------------------------------------------------------ SSVM ON UNSUPERVISED GNN-BASED FEATURES ------------------------------------------------------
 
@@ -971,6 +1465,62 @@ if __name__ == '__main__':
 
         # concatenate the evaluation scores of the GNN-based model to the dataframe with the evaluation scores of all methods
         test_evaluation = pd.concat([test_evaluation, test_evaluation_GNN], ignore_index=True)
+    
+    # ------------------------------------------------------ SSVM ON UNSUPERVISED GNN-BASED FEATURES WHOLE DATASET ------------------------------------------------------
+
+    # consider the unsupervised GNN-based model trained on both training and test graphs, if not excluded
+    if not args.no_unsupervised_GNN_complete:
+        
+        # train the unsupervised GNN-based model to compute embeddings, train an SSVM on the computed embeddings and evaluate the method on the test set
+        test_evaluation_GNN_complete = unsupervised_GNN_experiment_complete(
+            train_sorted_keys,
+            test_sorted_keys,
+            train_data,
+            test_data,
+            train_clinical_data,
+            test_clinical_data,
+            args.event,
+            args.event_time,
+            hyper_parameters_ssvm,
+            args.output_dir,
+            args.node_encoding_type,
+            args.random_seed,
+            args.cv_folds,
+            args.max_n_cores,
+            device,
+            args.save_plot,
+            args.verbose
+        )
+
+        # concatenate the evaluation scores of the GNN-based model to the dataframe with the evaluation scores of all methods
+        test_evaluation = pd.concat([test_evaluation, test_evaluation_GNN_complete], ignore_index=True)
+
+    # ------------------------------------------------------ SSVM ON ONCOTREE2VEC FEATURES WHOLE DATASET ------------------------------------------------------
+
+    # consider Oncotree2vec, if not excluded
+    if not args.no_oncotree2vec:
+
+        # print some information
+        print('Evaluating SSVM on OncoTree2Vec features trained on both training and test data...')
+
+        # train an SSVM on baseline embeddings and evaluate the method on the test set
+        test_evaluation_oncotree2vec = oncotree2vec_embeddings_experiment(
+            args.oncotree2vec_embeddings_path,
+            train_sorted_keys,
+            test_sorted_keys,
+            train_clinical_data,
+            test_clinical_data,
+            'Oncotree2Vec SSVM',
+            args.event,
+            args.event_time,
+            args.random_seed,
+            hyper_parameters_ssvm,
+            args.cv_folds,
+            args.max_n_cores
+        )
+
+        # concatenate the evaluation scores of oncotree2vec to the dataframe with the evaluation scores of all methods
+        test_evaluation = pd.concat([test_evaluation, test_evaluation_oncotree2vec], ignore_index=True)
 
     # ------------------------------------------------------ SUPERVISED GNN-BASED SURVIVAL TIME MODEL ------------------------------------------------------
 

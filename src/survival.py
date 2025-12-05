@@ -2,14 +2,21 @@ import os
 import torch
 import pandas as pd
 import numpy as np
+import networkx as nx
+from tqdm import tqdm
 from sklearn.model_selection import GridSearchCV
+from sklearn.cluster import AgglomerativeClustering
 import seaborn as sns
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from sksurv.util import Surv
 from sksurv.nonparametric import kaplan_meier_estimator
 from sksurv.compare import compare_survival
+from cancer_progression import TumorClustering
 from tumor_model import TumorGraphGNN
 from tumor_model import TorchTumorDataset
+from tumor_model import TrainerTumorModel
+from tumor_model import GraphDistances
 from sksurv.metrics import concordance_index_ipcw
 from sksurv.metrics import integrated_brier_score
 from sksurv.nonparametric import kaplan_meier_estimator
@@ -1272,7 +1279,6 @@ class Survival_Analysis:
         # set theme, style and add a light grid
         sns.set_theme()
         sns.set_style('white')
-        
 
         # set color palette
         palette = sns.color_palette('tab10', n_colors=len(kaplan_meier_data['Cluster'].unique()))
@@ -1280,16 +1286,16 @@ class Survival_Analysis:
         # create a facet figure with a facet for each clustering size
         grid = sns.FacetGrid(kaplan_meier_data, col='K', hue='Cluster', col_wrap=3, palette=palette, height=4, aspect=1)
 
-        # plot Kaplan-Meier confidence intervals
-        grid.map(plt.fill_between, 'Time', 'Conf_Int_Min', 'Conf_Int_Max', alpha=0.25, step='post', zorder=1)
+        # # plot Kaplan-Meier confidence intervals
+        # grid.map(plt.fill_between, 'Time', 'Conf_Int_Min', 'Conf_Int_Max', alpha=0.25, step='post', zorder=1)
 
         # plot Kaplan-Meier curves
         grid.map(plt.step, 'Time', 'Survival_Prob', where='post', zorder=4)
 
         # set axes, titles and legend
-        grid.set_axis_labels('Time (months)', 'Survival Probability')
+        grid.set_axis_labels('Time (months)', 'Survival Probability', size=18)
         grid.set(xlim=(0, None), ylim=(0, 1))
-        grid.set_titles(col_template='K={col_name}')
+        grid.set_titles(col_template='K={col_name}', size=20)
         grid.add_legend(title='Cluster')
 
         # iterate through each facet so to add log-rank p-values and median survival annotations
@@ -1297,7 +1303,15 @@ class Survival_Analysis:
             
             # add annotations with log-rank p-values
             p_val = log_rank_tests[log_rank_tests['K'] == k]['P_Value'].values[0]
-            ax.text(0.49, 0.87, f'Log-rank p = {p_val:.1e}', transform=ax.transAxes)
+            ax.text(0.3, 0.87, f'Log-rank p = {p_val:.1e}', transform=ax.transAxes, fontsize=16)
+            
+            # add subplot letter (A, B, C, etc.) at the top-left corner
+            plt.rcParams['text.usetex'] = True
+            subplot_index = list(grid.axes.flat).index(ax)
+            letter = chr(65 + subplot_index)
+            ax.text(-0.01, 1.15, rf'\textbf{{{letter}}}', transform=ax.transAxes,
+            fontsize=20, va='top', ha='left')
+            plt.rcParams['text.usetex'] = False
 
             # add 0.5 to y-ticks if not present
             yticks = ax.get_yticks()
@@ -1309,6 +1323,9 @@ class Survival_Analysis:
             for tick_label in ax.get_yticklabels():
                 if tick_label.get_text() == '0.5':
                     tick_label.set_fontweight('bold')
+            
+            # set the tick label size
+            ax.tick_params(axis='both', which='major', labelsize=16)
             
             # add a custom grid without spines
             for y_tick in yticks:
@@ -1336,8 +1353,13 @@ class Survival_Analysis:
                 ax.plot([median_time, median_time], [0.0, 0.5], linestyle='dashed', color=palette[i], zorder=3)
                 ax.scatter(median_time, 0.5, color=palette[i], edgecolor='black', alpha=0.8, zorder=5)
 
+        # set legend size larger
+        for text in grid.legend.texts:
+            text.set_fontsize(16)
+            grid.legend.get_title().set_fontsize(18)
+
         # add a supertitle and tight layout
-        plt.suptitle('Kaplan-Meier Curves for Different Clustering Sizes')
+        plt.suptitle('Kaplan-Meier Curves for Different Clustering Sizes', fontsize=22)
         grid.tight_layout()
 
         # save the figure
@@ -1345,7 +1367,7 @@ class Survival_Analysis:
 
         # close the figure
         plt.close()
-    
+
     @staticmethod
     def kaplan_meier_plot_for_k(data, time_column, event_column, k, save_path):
         """
@@ -1386,14 +1408,28 @@ class Survival_Analysis:
 
         # plotting
         sns.set_theme()
-        sns.set_style("whitegrid")
+        sns.set_style('whitegrid')
         palette = sns.color_palette('tab10', n_colors=len(km_data['Cluster'].unique()))
         fig, ax = plt.subplots(figsize=(6, 5))
+        ax.yaxis.grid(True, linestyle='--', linewidth=0.8, zorder=1)
+        ax.xaxis.grid(True, linestyle='--', linewidth=0.8, zorder=1)
+        ax.tick_params(axis='both', which='major', labelsize=20)
+
+        # add 0.5 to y-ticks if not present
+        yticks = ax.get_yticks()
+        if 0.5 not in yticks:
+            yticks = list(yticks) + [0.5]
+        ax.set_yticks(yticks)
+
+        # set only the 0.5 y-tick label to be bold
+        for tick_label in ax.get_yticklabels():
+            if tick_label.get_text() == '0.5':
+                tick_label.set_fontweight('bold')
 
         for i, cluster in enumerate(sorted(km_data['Cluster'].unique())):
             cluster_data = km_data[km_data['Cluster'] == cluster]
-            ax.fill_between(cluster_data['Time'], cluster_data['Conf_Int_Min'], cluster_data['Conf_Int_Max'],
-                            step='post', alpha=0.25, color=palette[i])
+            # ax.fill_between(cluster_data['Time'], cluster_data['Conf_Int_Min'], cluster_data['Conf_Int_Max'],
+            #                 step='post', alpha=0.25, color=palette[i])
             ax.step(cluster_data['Time'], cluster_data['Survival_Prob'], where='post',
                     label=f'Cluster {cluster}', color=palette[i])
 
@@ -1405,14 +1441,16 @@ class Survival_Analysis:
 
         # horizontal line at 0.5
         max_median = km_data[km_data['Survival_Prob'] <= 0.5].groupby('Cluster')['Time'].min().max()
-        ax.axhline(0.5, xmax=max_median / ax.get_xlim()[1], linestyle='--', color='black', alpha=0.5)
+        ax.axhline(0.5, xmax=max_median / ax.get_xlim()[1], linestyle='--', color='black', alpha=0.5, zorder=2)
 
-        ax.set_title(f'Kaplan-Meier Curve (K={k})')
-        ax.set_xlabel('Time (months)')
-        ax.set_ylabel('Survival Probability')
-        ax.set_ylim(0, 1)
-        ax.legend(title='Cluster')
-        ax.text(0.5, 0.9, f'Log-rank p = {p_value:.1e}', transform=ax.transAxes, ha='center')
+        ax.set_title(f'Kaplan-Meier Curve (K={k})', fontsize=20)
+        ax.set_xlabel('Time (months)', fontsize=18)
+        ax.set_ylabel('Survival Probability', fontsize=18)
+        ax.tick_params(axis='x', labelsize=14)
+        ax.tick_params(axis='y', labelsize=14)
+        ax.set_ylim(0, 1.01)
+        ax.legend(title='Cluster', fontsize=14, title_fontsize=16)
+        ax.text(0.45, 0.9, f'Log-rank p = {p_value:.1e}', transform=ax.transAxes, ha='center', fontsize=16)
 
         plt.tight_layout()
         plt.savefig(save_path)
@@ -1582,25 +1620,60 @@ class Survival_Prediction:
         sns.set_style('whitegrid')
 
         # set the font size
-        sns.set_context('paper', font_scale=1.5)
+        sns.set_context('paper')
+
+        # create a figure
+        plt.figure(figsize=(12, 9))
 
         # rename the predictor names so to have them displayed better in the plot
         plot_df['Predictor'] = plot_df['Predictor'].replace(
             {
-                'Supervised GNN': 'Supervised\nGNN',
-                'GNN SSVM': 'Unsupervised\nGNN',
-                'Baseline SSVM': 'Baseline'
+                'Supervised GNN': 'CPhyT-\nGNN\nSuper',
+                'GNN SSVM': 'CPhyT-\nGNN\nUnsuper',
+                'GNN Complete SSVM': 'CPhyT-\nGNN\nUnsuper' + r'$*$',
+                'Alteration SSVM': 'Alteration\nEncoding',
+                'Clone SSVM': 'Clone\nEncoding',
+                'Concat SSVM': 'Concat\nEncoding',
+                'Tree Cluster SSVM_2': 'Cluster\nEncoding\nK=2' + r'$*$',
+                'Tree Cluster SSVM_3': 'Cluster\nEncoding\nK=3' + r'$*$',
+                'Tree Cluster SSVM_4': 'Cluster\nEncoding\nK=4' + r'$*$',
+                'Oncotree2Vec SSVM': 'O2V' + r'$*$',
             }
         )
 
-        # create a box plot with the c-index scores for each predictor
-        ax = sns.boxplot(data=plot_df, x='Predictor', y='C-Index Censored', hue='Predictor', palette='tab10', linewidth=1.5)
-        ax.set_ylim(0.4, 0.75)
-        ax.set_xlabel('Predictor', labelpad=10)
-        ax.set_ylabel('C-Index Censored', labelpad=10)
+        # consider only the predictors of interest
+        plot_df = plot_df[plot_df['Predictor'].isin([
+            'Cluster\nEncoding\nK=3' + r'$*$',
+            'CPhyT-\nGNN\nSuper',
+            'CPhyT-\nGNN\nUnsuper',
+            'CPhyT-\nGNN\nUnsuper' + r'$*$',
+            'Alteration\nEncoding',
+            'Clone\nEncoding',
+            'Concat\nEncoding',
+            'Cluster\nEncoding\nK=3' + r'$*$',
+            'O2V' + r'$*$',
+        ])]
 
-        # add a title and tight layout
-        # plt.title('C-Index Censored for Different Predictors')
+        # determine the order of predictors based on the median c-index
+        order = plot_df.groupby('Predictor')['C-Index Censored'].median().sort_values(ascending=True).index
+
+        # create a box plot with the c-index scores for each predictor
+        ax = sns.boxplot(data=plot_df, x='Predictor', y='C-Index Censored', order=order, hue='Predictor', palette='tab10', linewidth=1.5)
+        
+        # set title and labels with larger font sizes
+        ax.set_title('Survival Time Prediction', fontsize=30, pad=15)
+        ax.set_ylim(0.35, 0.75)
+        ax.set_xlabel('Method', fontsize=26, labelpad=10)
+        ax.set_ylabel('C-Index Censored', fontsize=26, labelpad=10)
+
+        # enlarge tick labels
+        ax.tick_params(axis='x', labelsize=20)
+        ax.tick_params(axis='y', labelsize=20)
+
+        # format y-axis ticks to show fewer significant digits
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
+
+        # tight layout
         plt.tight_layout()
 
         # save the plot
@@ -1627,33 +1700,63 @@ class Survival_Prediction:
         # keep just the columns 'Experiment ID', 'Predictor' and 'C-Index IPCW'
         plot_df = plot_df[['Experiment ID', 'Predictor', 'C-Index IPCW']]
 
-        # rename the predictor names
-        plot_df['Predictor'] = plot_df['Predictor'].replace({'Random Survival Forest': 'Tumor Graph RSF'})
-
         # set theme, style and add a light grid
         sns.set_theme()
         sns.set_style('whitegrid')
 
         # set the font size
-        sns.set_context('paper', font_scale=1.5)
+        sns.set_context('paper')
+
+        # create a figure
+        plt.figure(figsize=(12, 9))
 
         # rename the predictor names so to have them displayed better in the plot
         plot_df['Predictor'] = plot_df['Predictor'].replace(
             {
-                'Supervised GNN': 'Supervised\nGNN',
-                'GNN SSVM': 'Unsupervised\nGNN',
-                'Baseline SSVM': 'Baseline'
+                'Supervised GNN': 'CPhyT-\nGNN\nSuper',
+                'GNN SSVM': 'CPhyT-\nGNN\nUnsuper',
+                'GNN Complete SSVM': 'CPhyT-\nGNN\nUnsuper' + r'$*$',
+                'Alteration SSVM': 'Alteration\nEncoding',
+                'Clone SSVM': 'Clone\nEncoding',
+                'Concat SSVM': 'Concat\nEncoding',
+                'Tree Cluster SSVM_2': 'Cluster\nEncoding\nK=2' + r'$*$',
+                'Tree Cluster SSVM_3': 'Cluster\nEncoding\nK=3' + r'$*$',
+                'Tree Cluster SSVM_4': 'Cluster\nEncoding\nK=4' + r'$*$',
+                'Oncotree2Vec SSVM': 'O2V' + r'$*$',
             }
         )
 
-        # create a box plot with the c-index scores for each predictor
-        ax = sns.boxplot(data=plot_df, x='Predictor', y='C-Index IPCW', hue='Predictor', palette='tab10')
-        ax.set_ylim(0.4, 0.75)
-        ax.set_xlabel('Predictor', labelpad=10)
-        ax.set_ylabel('C-Index IPCW', labelpad=10)
+        # consider only the predictors of interest
+        plot_df = plot_df[plot_df['Predictor'].isin([
+            'Cluster\nEncoding\nK=3' + r'$*$',
+            'CPhyT-\nGNN\nSuper',
+            'CPhyT-\nGNN\nUnsuper',
+            'CPhyT-\nGNN\nUnsuper' + r'$*$',
+            'Alteration\nEncoding',
+            'Clone\nEncoding',
+            'Concat\nEncoding',
+            'Cluster\nEncoding\nK=3' + r'$*$',
+            'O2V' + r'$*$',
+        ])]
 
-        # add a title and tight layout
-        # plt.title('C-Index IPCW for Different Predictors')
+        # determine the order of predictors based on the median c-index IPCW
+        order = plot_df.groupby('Predictor')['C-Index IPCW'].median().sort_values(ascending=True).index
+
+        # create a box plot with the c-index scores for each predictor
+        ax = sns.boxplot(data=plot_df, x='Predictor', y='C-Index IPCW', order=order, hue='Predictor', palette='tab10')
+        ax.set_title('Survival Time Prediction', fontsize=30, pad=15)
+        ax.set_ylim(0.35, 0.75)
+        ax.set_xlabel('Method', fontsize=26, labelpad=10)
+        ax.set_ylabel('C-Index IPCW', fontsize=26, labelpad=10)
+
+        # enlarge tick labels
+        ax.tick_params(axis='x', labelsize=20)
+        ax.tick_params(axis='y', labelsize=20)
+
+        # format y-axis ticks to show fewer significant digits
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
+
+        # tight layout
         plt.tight_layout()
 
         # save the plot
@@ -1819,6 +1922,30 @@ class Survival_Features:
         return pd.DataFrame(train_embeddings_dict), pd.DataFrame(test_embeddings_dict)
 
     @staticmethod
+    def dictionary_of_features(feature_matrix, patient_ids):
+        """
+        Creates a dictionary of features from the input feature matrix and patient ids, linking the features to the corresponding patient ids.
+
+        Parameters:
+        - feature_matrix: numpy array with the features for each patient.
+        - patient_ids: list with the ids of the patients corresponding to the rows of the feature matrix.
+                       It must be aligned with feature_matrix, i.e., patient_ids[i] is the id of the patient corresponding to feature_matrix[i, :].
+        
+        Returns:
+        - pd.DataFrame(features_dict): pandas dataframe with the features for each patient in the input list of patient ids.
+        """
+
+        # create a list of dictionaries with patient ids as keys and features as values
+        features_dict = []
+        for i, patient_id in enumerate(patient_ids):
+            curr_feature = {'Patient_ID': patient_id}
+            for j in range(feature_matrix.shape[1]):
+                curr_feature[f'feature_{j}'] = feature_matrix[i, j]
+            features_dict.append(curr_feature)
+        
+        return pd.DataFrame(features_dict)
+
+    @staticmethod
     def binary_patients_encoding(train_labels_mapping, graphs, patient_ids):
         """
         Encode each TumorGraph in graphs as a binary vector indicating the presence of mutations, using the mutations that appear in the training set.
@@ -1830,7 +1957,7 @@ class Survival_Features:
                        It must be aligned with graphs, i.e., patient_ids[i] is the id of the patient corresponding to graphs[i].
         
         Returns:
-        - pd.DataFrame(features_dict): pandas dataframe with the encoded features for each patient in the input list of TumorGraph objects and the corresponding patient ids.
+        - pandas dataframe with the encoded features for each patient in the input list of TumorGraph objects and the corresponding patient ids.
         """
         
         # compute the feature matrix for the input graphs
@@ -1840,32 +1967,132 @@ class Survival_Features:
                 for label in node.labels:
                     if label != "empty":
                         features[i, train_labels_mapping[label]] = 1
-
-        # create a list of dictionaries with patient ids as keys and features as values for patients in the training set
-        features_dict = []
-        for i, patient_id in enumerate(patient_ids):
-            curr_feature = {'Patient_ID': patient_id}
-            for j in range(features.shape[1]):
-                curr_feature[f'feature_{j}'] = features[i, j]
-            features_dict.append(curr_feature)
         
-        return pd.DataFrame(features_dict)
+        return Survival_Features.dictionary_of_features(features, patient_ids)
 
     @staticmethod
-    def get_binary_feature_vectors(
+    def clone_patients_encoding(train_labels_mapping, graphs, patient_ids):
+        """
+        Encode each TumorGraph in graphs as a vector with a component for each alteration and the corresponding value indicating how many clones with
+        that alteration are present in the TumorGraph.
+
+        Parameters:
+        - train_labels_mapping: dictionary that maps the node labels to consecutive integers starting from 0.
+        - graphs: list of TumorGraph objects to encode.
+        - patient_ids: list with the ids of the patients corresponding to the graphs.
+                       It must be aligned with graphs, i.e., patient_ids[i] is the id of the patient corresponding to graphs[i].
+        
+        Returns:
+        - pandas dataframe with the encoded features for each patient in the input list of TumorGraph objects and the corresponding patient ids.
+        """
+        
+        # compute the feature matrix for the input graphs
+        features = np.zeros((len(graphs), len(train_labels_mapping) - 1), dtype=np.int64)
+        for i, graph in enumerate(graphs):
+            digraph = graph.to_DiGraph()
+
+            for node_id, node_data in digraph.nodes.data():
+                n_descendant_nodes = len(nx.descendants(digraph, node_id))
+                for label in node_data['labels']:
+                    features[i, train_labels_mapping[label]] += n_descendant_nodes + 1    # the source node is not considered a descendant of itself
+        
+        return Survival_Features.dictionary_of_features(features, patient_ids)
+
+    @staticmethod
+    def concat_patients_encoding(train_labels_mapping, graphs, patient_ids):
+        """
+        Encode each TumorGraph in graphs as the concatenation of the alteration and clone-based encodings.
+
+        Parameters:
+        - train_labels_mapping: dictionary that maps the node labels to consecutive integers starting from 0.
+        - graphs: list of TumorGraph objects to encode.
+        - patient_ids: list with the ids of the patients corresponding to the graphs.
+                       It must be aligned with graphs, i.e., patient_ids[i] is the id of the patient corresponding to graphs[i].
+        
+        Returns:
+        - pandas dataframe with the encoded features for each patient in the input list of TumorGraph objects and the corresponding patient ids.
+        """
+        
+        # compute the alteration and clone-based feature vectors
+        alteration_features = Survival_Features.binary_patients_encoding(train_labels_mapping, graphs, patient_ids)
+        clone_features = Survival_Features.clone_patients_encoding(train_labels_mapping, graphs, patient_ids)
+
+        # rename the columns so to distinguish alteration and clone-based features
+        alteration_features = alteration_features.rename(columns={col: f'alteration_{col}' for col in alteration_features.columns if col != 'Patient_ID'})
+        clone_features = clone_features.rename(columns={col: f'clone_{col}' for col in clone_features.columns if col != 'Patient_ID'})
+
+        # merge the two dataframes on Patient_ID and return the result
+        return pd.merge(alteration_features, clone_features, on='Patient_ID')
+
+    @staticmethod
+    def tree_distance_clustering(train_distances, k_values, gamma):
+        """
+        Clusters the input training set applying hierarchical clustering to the true tree distances.
+
+        Parameters:
+        - train_distances: torch tensor with the distances among all train trees.
+        - k_values: list of clustering sizes.
+        - gamma: multiplicative parameter for the radius of the ball used to filter out outliers.
+        
+        Returns:
+        - clusterings_labels: dictionary containing the cluster labels assigned to patients for each value of k.
+        """
+
+        # dictionary that will contain the cluster labels for each input value of k
+        clusterings_labels = {}
+
+        # filter samples by considering only those with mean distance from the other samples < gamma * mean_distance
+        mean_per_sample = train_distances.sum(dim=1) / (train_distances.size(0) - 1)
+        mean_distance = train_distances[torch.triu_indices(train_distances.size(0), train_distances.size(1), offset=1)].mean()
+        mask = mean_per_sample < gamma * mean_distance
+        filtered_indices = mask.nonzero(as_tuple=True)[0]
+        filtered_distances = train_distances[filtered_indices][:, filtered_indices]
+
+        # convert the torch tensors with filtered distances and original distances into numpy arrays
+        train_distances_np = train_distances.detach().cpu().numpy().copy()
+        filtered_distances_np = filtered_distances.detach().cpu().numpy().copy()
+
+        # compute the percentage of outliers and print it
+        perc_outlier = 100.0 * (train_distances.size(0) - filtered_distances.size(0)) / train_distances.size(0)
+        print(f'Percentage of outliers: {perc_outlier: .2f}%')
+
+        # compute a clustering for each input value of k
+        for k in tqdm(k_values, desc='Computing clusterings', unit='clg'):
+            hierarchical_clustering = AgglomerativeClustering(n_clusters=k, metric='precomputed', linkage='average')
+            labels_filtered_samples = hierarchical_clustering.fit_predict(filtered_distances_np)
+            clusterings_labels[k] = np.full(train_distances.size(0), -1)                # initialize all labels to -1
+            clusterings_labels[k][filtered_indices.numpy()] = labels_filtered_samples   # assign labels only to non-outlier samples
+            for i in range(len(clusterings_labels[k])):                                 # assign each outlier to the closest cluster
+                if clusterings_labels[k][i] == -1:
+                    clusters_distances = []
+                    for c in range(k):
+                        members = np.where(clusterings_labels[k] == c)[0]
+                        clusters_distances.append(train_distances_np[i, members].mean())
+                    clusterings_labels[k][i] = np.argmin(clusters_distances)
+
+        # compute the size of each cluster for each value of k and print them
+        clusterings_sizes = TumorClustering.cluster_sizes_all_k(clusterings_labels)
+        TumorClustering.print_cluster_sizes_all_k(clusterings_sizes)
+
+        return clusterings_labels
+
+    @staticmethod
+    def get_baseline_feature_vectors(
         train_phylogenies_path,
         test_phylogenies_path,
         rd_seed=None,
         min_label_occurrences=0,
+        encoding_function=binary_patients_encoding
         ):
         """
-        Computes the features for the input training and test sets as binary vectors indicating the presence of mutations.
+        Computes the features for the input training and test sets using the input encoding function.
 
         Parameters:
         - train_phylogenies_path: string with the path to the file containing the training phylogenies.
         - test_phylogenies_path: string with the path to the file containing the test phylogenies.
         - rd_seed: integer with the random seed for reproducibility.
         - min_label_occurrences: integer with the minimum number of occurrences for a label to be considered.
+        - encoding_function: function to be used for encoding the patients.
 
         Returns:
         - train_features: dataframe with the features for each patient in the training set.
@@ -1905,7 +2132,122 @@ class Survival_Features:
         train_labels_mapping = TorchTumorDataset.map_node_labels(train_data.node_labels())
         
         # compute the features for the training and test sets
-        train_features = Survival_Features.binary_patients_encoding(train_labels_mapping, train_graphs, train_sorted_keys)
-        test_features = Survival_Features.binary_patients_encoding(train_labels_mapping, test_graphs, test_sorted_keys)
+        train_features = encoding_function(train_labels_mapping, train_graphs, train_sorted_keys)
+        test_features = encoding_function(train_labels_mapping, test_graphs, test_sorted_keys)
         
+        return train_features, test_features
+
+    @staticmethod
+    def tree_cluster_patients_encoding(graphs, patient_ids, k_values, gamma, device=torch.device('cpu')):
+        """
+        Encode each TumorGraph in graphs using the tree-cluster based encoding.
+
+        Parameters:
+        - graphs: list of TumorGraph objects to encode.
+        - patient_ids: list with the ids of the patients corresponding to the graphs.
+                       It must be aligned with graphs, i.e., patient_ids[i] is the id of the patient corresponding to graphs[i].
+        - k_values: list of integers representing the clustering sizes.
+        - gamma: multiplicative parameter for the radius of the ball used to filter out outliers.
+        - device: device to be used for tensor operations.
+        
+        Returns:
+        - encodings: dictionary with a pandas dataframe for each clustering size with the encoded features for each patient in the input list of TumorGraph objects and the corresponding patient ids.
+        """
+        
+        # compute the tree distance matrix for the input graphs
+        distances = GraphDistances.compute_distances([graph.to_DiGraph() for graph in graphs], GraphDistances.ancestor_descendant_dist).to(device)
+
+        # compute the clusterings of graphs for the input values of k
+        clusterings_labels = Survival_Features.tree_distance_clustering(distances, k_values, gamma)
+
+        # compute the feature vectors for each clustering
+        encodings = {}
+        for k in k_values:
+            features = np.zeros((len(graphs), k), dtype=np.int64)
+            for i in range(len(graphs)):
+                cluster_label = clusterings_labels[k][i]
+                features[i, cluster_label] = 1
+            encodings[k] = Survival_Features.dictionary_of_features(features, patient_ids)
+        
+        return encodings
+
+    @staticmethod
+    def get_clustering_feature_vectors(
+        train_phylogenies_path,
+        test_phylogenies_path,
+        gamma,
+        k_values,
+        rd_seed=None,
+        min_label_occurrences=0,
+        encoding_function=binary_patients_encoding,
+        device=torch.device('cpu')
+        ):
+        """
+        Computes the features for the input training and test sets using the input clustering-based encoding function.
+
+        Parameters:
+        - train_phylogenies_path: string with the path to the file containing the training phylogenies.
+        - test_phylogenies_path: string with the path to the file containing the test phylogenies.
+        - gamma: multiplicative parameter for the radius of the ball used to filter out outliers.
+        - k_values: list of clustering sizes.
+        - rd_seed: integer with the random seed for reproducibility.
+        - min_label_occurrences: integer with the minimum number of occurrences for a label to be considered.
+        - encoding_function: function to be used for encoding the patients.
+        - device: device to be used for tensor operations.
+
+        Returns:
+        - train_features: dictionary with one dataframe for each input clustering size with the features for each patient in the training set.
+        - test_features: dictionary with one dataframe for each input clustering size with the features for each patient in the test set.
+        """
+
+        # load the training and test sets with phylogenies
+        train_phylogenies = TrainerTumorModel.load_dataset_txt(train_phylogenies_path)
+        test_phylogenies = TrainerTumorModel.load_dataset_txt(test_phylogenies_path)
+
+        # create TumorDataset object containing patients in training, test and whole dataset
+        train_sorted_keys = sorted(train_phylogenies.keys())
+        test_sorted_keys = sorted(test_phylogenies.keys())
+        sorted_keys = train_sorted_keys + test_sorted_keys
+        train_list_patients = [train_phylogenies[key] for key in train_sorted_keys]
+        test_list_patients = [test_phylogenies[key] for key in test_sorted_keys]
+        list_patients = train_list_patients + test_list_patients
+        train_data = TumorDataset(train_list_patients)
+        test_data = TumorDataset(test_list_patients)
+        data = TumorDataset(list_patients)
+
+        # compute the set of labels to be considered, based on the number of occurrences in the whole dataset
+        if min_label_occurrences > 0:
+            data.remove_infreq_labels(min_label_occurrences)
+
+        # sample one graph per patient
+        train_data.sample_one_graph_per_patient(rd_seed=rd_seed)
+        test_data.sample_one_graph_per_patient(rd_seed=rd_seed)
+
+        # flatten the two datasets so to have two lists of graphs rather than two lists of patients
+        train_graphs = [graph for patient in train_data.dataset for graph in patient]
+        test_graphs = [graph for patient in test_data.dataset for graph in patient]
+        
+        # compute the features for the training and test sets, coputing a clustering of all the graphs
+        graphs = train_graphs + test_graphs
+        sorted_keys = train_sorted_keys + test_sorted_keys
+        features = encoding_function(graphs, sorted_keys, k_values, gamma, device=device)
+
+        # split back training and test features
+        train_features = {k: df[df['Patient_ID'].isin(train_sorted_keys)].reset_index(drop=True) for k, df in features.items()}
+        test_features = {k: df[df['Patient_ID'].isin(test_sorted_keys)].reset_index(drop=True) for k, df in features.items()}
+
+        # DEBUG
+        for k in k_values:
+            print(f'Clustering size: {k}')
+            print(f'Train features shape: {train_features[k].shape}')
+            print(f'Test features shape: {test_features[k].shape}')
+            print(f'Train keys:\n{train_sorted_keys}')
+            print(f'Train features keys:\n{train_features[k]["Patient_ID"].tolist()}')
+            print(f'Train features head:\n{train_features[k].head()}')
+            print(f'Test keys:\n{test_sorted_keys}')
+            print(f'Test features keys:\n{test_features[k]["Patient_ID"].tolist()}')
+            print(f'Test features head:\n{test_features[k].head()}')
+            print(f'All features keys:\n{features[k]["Patient_ID"].tolist()}')
+            print(f'All features head:\n{features[k].head()}')
+
         return train_features, test_features

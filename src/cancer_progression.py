@@ -236,6 +236,36 @@ class Baselines:
         return patients_prob
     
     @staticmethod
+    def compute_normalized_patients_probabilities(patients, trees_probabilities):
+        """
+        Computes the probability of patients in a dataset, given the probabilities of the single trees belonging to them.
+        The probability of each tree is normalized by its length.
+        
+        Parameters:
+        - patients: array of patients, where each patient consists of some trees.
+        - trees_probabilities: list of probabilities assigned to trees in the input data.
+        
+        Returns:
+        - patients_prob: list of probabilities of patients, where element i is the probability of patient i in patients, computed as
+                         mean of the probabilities of the trees belonging to that patient.
+                         The probability of each tree is normalized by its length.
+        """
+        
+        # list that will contain patients' probabilities
+        patients_prob = []
+
+        # normalize the probability of each tree and compute the probability of each patient as the average of the probabilities of its trees
+        curr_tree_index = 0
+        for patient in patients:
+            curr_sum_probs = 0
+            for tree in patient:
+                curr_sum_probs += trees_probabilities[curr_tree_index] / len(tree)
+                curr_tree_index += 1
+            patients_prob.append(curr_sum_probs / len(patient))
+
+        return patients_prob
+
+    @staticmethod
     def balanced_CloMu_probabilities_clustering(dataset_path, clusterings_folder, clustering_sizes, test_set, infinite_sites, max_tree_length, iterations):
         """
         Computes a clustering of the input dataset based on CloMu probabilities for each clustering size.
@@ -313,6 +343,85 @@ class Baselines:
                 # check if we have already reached the final number of cluster and if so, save curr_dataset as last cluster
                 if i == n_clusters - 2:
                     np.save(os.path.join(clusterings_folder, f'k_{n_clusters}', f'cluster_{i + 1}.npy'), np.concatenate((curr_dataset, test_set), axis=0))
+
+    @staticmethod
+    def CloMu_probabilities_clustering(random_dir_path, clusterings_folder, clustering_sizes, train_set, test_set, infinite_sites, max_tree_length, iterations):
+        """
+        Computes a clustering of the input dataset based on CloMu probabilities for each clustering size.
+
+        Parameters:
+        - random_dir_path: path to the directory with pre-computed random clusterings.
+        - clusterings_folder: path to the folder where to save all computed clusterings.
+        - clustering_sizes: number of clusters of the desired clustering.
+        - n_iter: number of iterations for each training performed by the function.
+        - train_set: ndarray of training patients to be clustered.
+        - test_set: ndarray of test patients to be concatenated at the end of each cluster.
+        - infinite_sites: whether the infinite sites assumption has to be enabled or not.
+        - max_tree_length: maximum length of a tree to be considered, otherwise it is removed. The length of a tree is the number of edges it contains.
+        - iterations: number of training epochs for each CloMu instance.
+        """
+
+        # compute the number of trees in the training set
+        n_train_trees = 0
+        for patient in train_set:
+            n_train_trees += len(patient)
+
+        # dictionary that will contain all pre-computed random clusterings
+        random_clusterings = {}
+
+        # load all pre-computed random clusterings
+        for n_clusters in clustering_sizes:
+            random_clusters = []
+            for c in range(n_clusters):
+                cluster = np.load(os.path.join(random_dir_path, f'k_{n_clusters}', f'cluster_{c}.npy'), allow_pickle=True)
+                random_clusters.append(cluster[:-len(test_set)])    # exclude test patients added at the end of each cluster
+            random_clusterings[n_clusters] = random_clusters
+        
+        # train a different CloMu instance on each cluster of each clustering
+        for n_clusters in clustering_sizes:
+            print(f'\nComputing clustering with K = {n_clusters}\n')
+            clusters_train_probabilities = []
+            for i in range(n_clusters):
+                print(f'Cluster {i + 1}/{n_clusters}\n')
+                os.makedirs(os.path.join(clusterings_folder, f'k_{n_clusters}'), exist_ok=True)    # folders where to save the current clustering
+                curr_cluster = np.concatenate((np.array(random_clusterings[n_clusters][i], dtype=train_set.dtype), train_set), axis=0)    # concatenate the current cluster with the entire training set, because we need the trained CloMu to assign a probability to each training tree
+                np.save(os.path.join(clusterings_folder, f'k_{n_clusters}', f'temp_dataset.npy'), curr_cluster)    # save the current cluster where to train CloMu
+                
+                # train a CloMu instance on the current cluster and apply it to get probabilities for the concatenated test set
+                CloMu.trainModel(
+                    [os.path.join(clusterings_folder, f'k_{n_clusters}', f'temp_dataset.npy')],                            # path to the current dataset with a cluster as training set and the test set
+                    os.path.join(clusterings_folder, f'k_{n_clusters}', f'CloMu_weights_cluster_{i}.pt'),                  # path where to save the trained CloMu weights
+                    os.path.join(clusterings_folder, f'k_{n_clusters}', f'CloMu_probabilities_cluster_{i}.npy'),           # path where to save the probabilities assigned both to train and test trees
+                    os.path.join(clusterings_folder, f'k_{n_clusters}', f'CloMu_mutations_cluster_{i}.npy'),               # path where to save the mutation names found during training
+                    patientNames='',
+                    inputFormat='raw',                                                                                     # format of the input dataset
+                    infiniteSites=infinite_sites,                                                                          # whether the infinite sites assumption has to be enabled or not
+                    trainSize=len(random_clusterings[n_clusters][i]),                                                      # number of patients in the training set for the current cluster
+                    maxM=max_tree_length,                                                                                  # maximum length of a tree to be considered, otherwise it is removed            
+                    regularizeFactor='default',        
+                    iterations=iterations,                                                                                 # number of training epochs
+                    verbose=False                                                                                          # whether to print information during training
+                )
+
+                # load the probabilities assigned by the trained model to all training trees
+                probs = np.load(os.path.join(clusterings_folder, f'k_{n_clusters}', f'CloMu_probabilities_cluster_{i}.npy'), allow_pickle=True)                
+                probs = probs[-n_train_trees:]
+
+                # compute the probability of each training patient as the mean of the probabilities assigned to its trees
+                patients_probs = Baselines.compute_patients_probabilities(train_set, probs)
+
+                # append the probabilities assigned to training patients by the current trained CloMu instance
+                clusters_train_probabilities.append(patients_probs)
+            
+            # find the CloMu instance that assigns a larger probability to each training patient: that will be the cluster label for each patient
+            clusters_train_probabilities = np.array(clusters_train_probabilities)
+            patients_cluster_labels = np.argmax(clusters_train_probabilities, axis=0)
+
+            # create and save the new clusters and append the test set to each of them
+            for i in range(n_clusters):
+                curr_cluster = train_set[patients_cluster_labels == i]
+                curr_cluster = np.concatenate([curr_cluster, test_set], axis=0)
+                np.save(os.path.join(clusterings_folder, f'k_{n_clusters}', f'cluster_{i}.npy'), curr_cluster)
 
     @staticmethod 
     def clusters_dimension(clusters_path, n_clusters, test_set):
@@ -984,7 +1093,7 @@ class Ensemble:
         """
 
         # information about what will be printed
-        print('\nAvg number of times each method is beated across random seeds:')
+        print('\nAvg number of times each method is beaten across random seeds:')
 
         # dictionary that will contain mean percentages across different random seeds for all methods
         mean_rd_perc = {}
@@ -1024,7 +1133,7 @@ class Ensemble:
         """
 
         # information about what will be printed
-        print('\nAvg number of times each method is beated:\n')
+        print('\nAvg number of times each method is beaten:\n')
 
         # dictionary that will contain mean percentages across different random seeds and clustering sizes for all methods
         mean_rd_perc = {}
@@ -1322,13 +1431,19 @@ class Ensemble:
 
         # change the name of the models to be used to label the axes
         new_method_to_compare = method_to_compare.replace('_', ' ')
+        if new_method_to_compare == 'GNN':
+            new_method_to_compare = 'CPhyT-GNN'
         names_mapping = {
             'baseline_CloMu': f'{new_method_to_compare}\nvs\nStandard',
+            'Tree_distances': f'{new_method_to_compare}\nvs\nTrees\nUnfiltered',
+            'Tree_distances_filtered': f'{new_method_to_compare}\nvs\nTrees',
             'Random': f'{new_method_to_compare}\nvs\nRandom',
             'CloMu_based': f'{new_method_to_compare}\nvs\nCloMu',
+            'CloMu_based_normalized': f'{new_method_to_compare}\nvs\nNormalized\nCloMu',
             'Random_100': f'{new_method_to_compare}\nvs\nRandom 100',
             'RECAP': f'{new_method_to_compare}\nvs\nRECAP',
             'RECAP_100': f'{new_method_to_compare}\nvs\nRECAP 100',
+            'RECAP_50': f'{new_method_to_compare}\nvs\nRECAP 50',
             'oncotree2vec': f'{new_method_to_compare}\nvs\nO2V',
             'GNN': f'{new_method_to_compare}\nvs\nGNN',
             'GNN_100': f'{new_method_to_compare}\nvs\nGNN 100'
@@ -1352,7 +1467,8 @@ class Ensemble:
                 box_colors.append(sns.set_hls_values(to_rgb(base_color), l=luminance))
 
         # create figure and axes
-        fig, ax = plt.subplots(figsize=(9, 6))
+        # fig, ax = plt.subplots(figsize=(16, 10)) # breast
+        fig, ax = plt.subplots(figsize=(13, 8)) # AML
 
         # plot the boxes
         sns.boxplot(
@@ -1379,20 +1495,20 @@ class Ensemble:
             title='Clustering',
             handlelength=4,
             handler_map={tuple: HandlerTuple(ndivide=None, pad=0)},
-            fontsize=16,
-            title_fontsize=18
+            fontsize=20,
+            title_fontsize=22
         )
 
         # plot a horizontal line at 50%
         plt.axhline(y=50, color='r', linestyle='--')
 
         # set title, labels and ticks
-        plt.title('Relative Performances, F=100', fontsize=24)
-        plt.xlabel('Method', fontsize=20)
-        plt.ylabel('Patients (%)', fontsize=20)
+        plt.title('Relative Performances', fontsize=30)
+        plt.xlabel('Method', fontsize=26)
+        plt.ylabel('Patients (%)', fontsize=26)
         plt.ylim(29, 101)
-        ax.tick_params(axis='x', labelsize=18)
-        ax.tick_params(axis='y', labelsize=18)
+        ax.tick_params(axis='x', labelsize=22)
+        ax.tick_params(axis='y', labelsize=22)
         plt.tight_layout()
 
         # remove spines
@@ -1403,8 +1519,8 @@ class Ensemble:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path)
 
-        # show the plot
-        plt.show()
+        # # show the plot
+        # plt.show()
 
     @staticmethod
     def plot_global_percentages(global_percentages_df, save_path=None):
@@ -1421,13 +1537,17 @@ class Ensemble:
         names_mapping = {
             'baseline_CloMu': 'Standard',
             'Random': 'Random',
+            'Tree_distances': 'Trees\nUnfiltered',
+            'Tree_distances_filtered': 'Trees',
             'CloMu_based': 'CloMu',
+            'CloMu_based_normalized': 'Normalized\nCloMu',
             'Random_100': 'Random 100',
             'RECAP': 'RECAP',
-            'RECAP_100': 'RECAP 100',
+            'RECAP_100': 'RECAP\n100',
+            'RECAP_50': 'RECAP 50',
             'oncotree2vec': 'O2V',
-            'GNN': 'GNN',
-            'GNN_100': 'GNN 100'
+            'GNN': 'CPhyT-GNN',
+            'GNN_100': 'CPhyT-GNN 100'
         }
         global_percentages_df['method'] = global_percentages_df['method'].replace(names_mapping)
 
@@ -1448,7 +1568,8 @@ class Ensemble:
                 box_colors.append(sns.set_hls_values(to_rgb(base_color), l=luminance))
 
         # create figure and axes
-        fig, ax = plt.subplots(figsize=(9, 6))
+        # fig, ax = plt.subplots(figsize=(16, 10)) # breast
+        fig, ax = plt.subplots(figsize=(13, 8)) # AML
 
         # plot the boxes
         sns.boxplot(
@@ -1475,17 +1596,17 @@ class Ensemble:
             title='Clustering',
             handlelength=4,
             handler_map={tuple: HandlerTuple(ndivide=None, pad=0)},
-            fontsize=16,
-            title_fontsize=18
+            fontsize=20,
+            title_fontsize=22
         )
 
         # set title, labels and ticks
-        plt.title('Absolute Performances, F=100', fontsize=24)
-        plt.xlabel('Method', fontsize=20)
-        plt.ylabel('Patients (%)', fontsize=20)
-        plt.ylim(-1, 61)
-        ax.tick_params(axis='x', labelsize=18)
-        ax.tick_params(axis='y', labelsize=18)
+        plt.title('Absolute Performances', fontsize=30)
+        plt.xlabel('Method', fontsize=26)
+        plt.ylabel('Patients (%)', fontsize=26)
+        plt.ylim(-1, 81)
+        ax.tick_params(axis='x', labelsize=22)
+        ax.tick_params(axis='y', labelsize=22)
         plt.tight_layout()
 
         # remove spines
@@ -1496,5 +1617,5 @@ class Ensemble:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             plt.savefig(save_path)
 
-        # show the plot
-        plt.show()
+        # # show the plot
+        # plt.show()

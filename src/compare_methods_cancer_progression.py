@@ -22,7 +22,7 @@ def parse_args():
                           
     # optional arguments
     parser.add_argument('-k', '--k_values', type=int, nargs='+', default=[2, 3, 4], help='List of values of clustering sizes to be used for clustering. They must be integers greater than 1')
-    parser.add_argument('-m', '--methods', type=str, nargs='+', default=['Random', 'CloMu_based', 'oncotree2vec', 'RECAP'], help='List of methods to be compared. They must be from [Random, CloMu_based, RECAP, oncotree2vec].' \
+    parser.add_argument('-m', '--methods', type=str, nargs='+', default=['Tree_distances', 'Tree_distances_filtered', 'Random', 'CloMu_based', 'oncotree2vec', 'RECAP', 'RECAP_100'], help='List of methods to be compared. They must be from [Random, CloMu_based, RECAP, oncotree2vec].' \
                         'Remind that RECAP cannot be applied to the AML dataset. Standard CloMu is always considered')
     parser.add_argument('-p', '--plots_path', type=str, default='../plots', help='Path to the directory where to save the plots')
 

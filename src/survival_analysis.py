@@ -144,7 +144,7 @@ def parse_args():
     parser.add_argument('--dropout_prob_1', type=float, default=0.0, help='Dropout probability before the second GCN layer of the trained model')
     parser.add_argument('--dropout_prob_2', type=float, default=0.0, help='Dropout probability before the final linear layer of the trained model')
     parser.add_argument('--batch_normalization', action='store_true', help='Whether batch normalization was used when training the loaded model')
-    parser.add_argument('-k', '--k_values', type=int, nargs='+', default=list(range(2, 16)), help='List of values of clustering sizes to be used for clustering. They must be integers greater than 1')
+    parser.add_argument('-k', '--k_values', type=int, nargs='+', default=list(range(3, 6)), help='List of values of clustering sizes to be used for clustering. They must be integers greater than 1')
     parser.add_argument('--gamma', type=float, default=1, help='Multiplicative parameter for the radius of the ball used to filter the outlier embeddings before clustering')
 
     return parser.parse_args()    
@@ -196,7 +196,8 @@ if __name__ == '__main__':
 
     # make a facet figure with a plot for each clustering size and a curve for each cluster in each plot
     os.makedirs(os.path.dirname(args.save_plot), exist_ok=True)
-    Survival_Analysis.kaplan_meier_plot_for_k(clusterings_df, args.event_time, args.event, 2, args.save_plot)
+    # Survival_Analysis.kaplan_meier_plot_for_k(clusterings_df, args.event_time, args.event, 2, args.save_plot) # single kaplan meier curve
+    Survival_Analysis.kaplan_meier_curves(clusterings_df, args.event_time, args.event, args.save_plot)
 
     # compute and print the log-rank test p-values for each pair of clusters in each clustering
     Survival_Analysis.print_logranks(Survival_Analysis.pairwise_logranks(clusterings_df, args.event_time, args.event))

@@ -21,8 +21,11 @@ def load_evaluation_scores(dir_path):
     # iterate over the random seed directories 
     for rd_seed_dir in Utils.listdir_nohidden(dir_path):
         
-        # load the evaluation scores for the current random seed and ppend them to the dataframe
-        eval_scores = pd.concat([eval_scores, pd.read_csv(os.path.join(dir_path, rd_seed_dir, 'methods_evaluation.csv'))], ignore_index=True)
+        # consider only random seed directories
+        if rd_seed_dir.startswith('random_seed_'):
+
+            # load the evaluation scores for the current random seed and ppend them to the dataframe
+            eval_scores = pd.concat([eval_scores, pd.read_csv(os.path.join(dir_path, rd_seed_dir, 'methods_evaluation.csv'))], ignore_index=True)
     
     return eval_scores
 

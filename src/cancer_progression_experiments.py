@@ -20,6 +20,7 @@ from tqdm import tqdm
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import silhouette_score
+from sklearn.metrics.pairwise import cosine_distances
 from functools import partial
 from tumor_model import TumorGraphGNN
 from tumor_model import TrainerTumorModel as Trainer
@@ -147,7 +148,7 @@ def hyperparameters_tuning(optuna_db, random_seed, device, train_torch_data, tra
 
 def cluster_GNN_embeddings(embeddings, k_values, gamma, clusterings_dir):
     """
-    Clusters the imput embeddings using the input values of clustering size.
+    Clusters the input embeddings using the input values of clustering size.
     It uses k-means considering the Euclidean distance between embeddings.
 
     Parameters:
@@ -181,19 +182,36 @@ def cluster_GNN_embeddings(embeddings, k_values, gamma, clusterings_dir):
 
     return clusterings_labels
 
-def cluster_oncotree2vec_embeddings(embeddings, k_values, clusterings_dir):
+def cluster_oncotree2vec_embeddings(embeddings, k_values, gamma, clusterings_dir):
     """
-    Clusters the imput embeddings using the input values of clustering size.
+    Clusters the input embeddings using the input values of clustering size.
     It uses hierarchical clustering considering the cosine distance between embeddings, as done by the authors of oncotree2vec.
 
     Parameters:
     - embeddings: numpy array containing the embeddings to be clustered. It has shape (n_patients, n_features).
     - k_values: list of values of k to be used for clustering.
+    - gamma: multiplicative parameter for the radius of the ball used to filter the outlier embeddings before clustering.
     - clusterings_dir: path to the base directory where to save the clustering results.
 
     Returns:
     - clusterings_labels: dictionary containing the cluster labels for each value of k.
     """
+
+    # filter embeddings by keeping only those in a ball centered in the mean embedding
+    mean_embedding = embeddings.mean(axis=0, keepdims=True)
+    cosine_distances_to_mean = cosine_distances(embeddings, mean_embedding).squeeze()
+    radius = gamma * cosine_distances_to_mean.mean()
+    filtered_indices = np.where(cosine_distances_to_mean <= radius)[0]
+
+    # compute the percentage of outliers and print it
+    print(f'Percentage of outliers: {TumorClustering.percentage_outliers(torch.tensor(embeddings), filtered_indices): .2f}%')
+
+    # scale the embeddings
+    scaler = StandardScaler()
+    embeddings_scaled = scaler.fit_transform(embeddings)
+
+    # extract the embeddings to be used for computing the clustering
+    filtered_embeddings = embeddings_scaled[filtered_indices]
 
     # dictionary that will contain the cluster labels for each input value of k
     clusterings_labels = {}
@@ -201,15 +219,26 @@ def cluster_oncotree2vec_embeddings(embeddings, k_values, clusterings_dir):
     # dictionary that will contain the silhouette score for each input value of k
     silhouette_clusterings = {}
 
-    # scale the embeddings
-    scaler = StandardScaler()
-    embeddings = scaler.fit_transform(embeddings)
-
-    # compute a clustering for each input value of k
+    # compute a clustering for each input value of k using only the filtered embeddings
     for k in tqdm(k_values, desc='Computing clusterings', unit='clg'):
         hierarchical_clustering = AgglomerativeClustering(n_clusters=k, metric='cosine', linkage='average')
-        clusterings_labels[k] = hierarchical_clustering.fit_predict(embeddings)
-        silhouette_clusterings[k] = silhouette_score(embeddings, clusterings_labels[k])
+        labels_filtered_embeddings = hierarchical_clustering.fit_predict(filtered_embeddings)
+        clusterings_labels[k] = np.full(embeddings_scaled.shape[0], -1)                        # initialize all labels to -1
+        clusterings_labels[k][filtered_indices] = labels_filtered_embeddings   # assign labels only to non-outlier samples
+        for i in range(len(clusterings_labels[k])):                                    # assign each outlier to the closest cluster
+            if clusterings_labels[k][i] == -1:
+                clusters_distances = []
+                for c in range(k):
+                    members = np.where(clusterings_labels[k] == c)[0]
+                    if len(members) == 0:
+                        clusters_distances.append(np.inf)
+                        continue
+                    mean_dist = cosine_distances(embeddings_scaled[i].reshape(1, -1), embeddings_scaled[members]).mean()  # compute the mean distance from the members of the cluster
+                    clusters_distances.append(mean_dist)
+                clusterings_labels[k][i] = np.argmin(clusters_distances)  # assign the outlier to the closest cluster
+
+        # compute the silhouette score for the current clustering
+        silhouette_clusterings[k] = silhouette_score(embeddings_scaled, clusterings_labels[k], metric='cosine')
 
     # print the average silhouette score for each computed clustering
     for k, s in silhouette_clusterings.items():
@@ -282,6 +311,90 @@ def random_clustering(train_set, test_set, k_values, GNN_clusterings_dir, random
         for i in range(k):
             np.save(os.path.join(curr_random_clusters_path, f'cluster_{i}.npy'), np.concatenate((rd_clustering[i], test_set), axis=0))
 
+def tree_distance_clustering(train_distances, k_values, gamma, clusterings_dir):
+    """
+    Clusters the input training set applying hierarchical clustering to the true tree distances.
+
+    Parameters:
+    - train_distances: torch tensor with the distances among all train trees.
+    - k_values: list of clustering sizes.
+    - gamma: multiplicative parameter for the radius of the ball used to filter out outliers.
+    - clusterings_dir: path where to save the computed clusterings.
+    
+    Returns:
+    - clusterings_labels: dictionary containing the cluster labels for each value of k.
+    """
+
+    # dictionary that will contain the cluster labels for each input value of k
+    clusterings_labels = {}
+
+    # dictionary that will contain the silhouette score for each input value of k
+    silhouette_clusterings = {}
+
+    # filter samples by considering only those with mean distance from the other samples < gamma * mean_distance
+    mean_per_sample = train_distances.sum(dim=1) / (train_distances.size(0) - 1)
+    mean_distance = train_distances[torch.triu_indices(train_distances.size(0), train_distances.size(1), offset=1)].mean()
+    mask = mean_per_sample < gamma * mean_distance
+    filtered_indices = mask.nonzero(as_tuple=True)[0]
+    filtered_distances = train_distances[filtered_indices][:, filtered_indices]
+
+    # convert the torch tensors with filtered distances and original distances into numpy arrays
+    train_distances_np = train_distances.detach().cpu().numpy().copy()
+    filtered_distances_np = filtered_distances.detach().cpu().numpy().copy()
+
+    # compute the percentage of outliers and print it
+    perc_outlier = 100.0 * (train_distances.size(0) - filtered_distances.size(0)) / train_distances.size(0)
+    print(f'Percentage of outliers: {perc_outlier: .2f}%')
+
+    # compute a clustering for each input value of k
+    for k in tqdm(k_values, desc='Computing clusterings', unit='clg'):
+        hierarchical_clustering = AgglomerativeClustering(n_clusters=k, metric='precomputed', linkage='average')
+        labels_filtered_samples = hierarchical_clustering.fit_predict(filtered_distances_np)
+        clusterings_labels[k] = np.full(train_distances.size(0), -1)                # initialize all labels to -1
+        clusterings_labels[k][filtered_indices.numpy()] = labels_filtered_samples   # assign labels only to non-outlier samples
+        for i in range(len(clusterings_labels[k])):                                 # assign each outlier to the closest cluster
+            if clusterings_labels[k][i] == -1:
+                clusters_distances = []
+                for c in range(k):
+                    members = np.where(clusterings_labels[k] == c)[0]
+                    clusters_distances.append(train_distances_np[i, members].mean())
+                clusterings_labels[k][i] = np.argmin(clusters_distances)
+        silhouette_clusterings[k] = silhouette_score(train_distances_np, clusterings_labels[k], metric='precomputed')
+
+    # print the average silhouette score for each computed clustering
+    for k, s in silhouette_clusterings.items():
+        print(f'K = {k}: s = {s}')
+
+    # compute the size of each cluster for each value of k and print them
+    clusterings_sizes = TumorClustering.cluster_sizes_all_k(clusterings_labels)
+    TumorClustering.print_cluster_sizes_all_k(clusterings_sizes)
+
+    # create the folder where to save the computed cluster labels, if it does not exist
+    os.makedirs(clusterings_dir, exist_ok=True)
+
+    # save the computed cluster labels, with one file per value of k
+    TumorClustering.save_cluster_labels(clusterings_labels, clusterings_dir)
+
+    return clusterings_labels
+
+def check_random_clusterings(clusterings_dir_path, k_values):
+    """
+    Checks whether pre-computed random clusterings exist or not.
+
+    Parameters:
+    - clusterings_dir_path: path to the directory where to check whether there are pre-computed random clusterings.
+    - k_values: list of clustering sizes.
+    """
+
+    # iterate trhough the values of k to check whether the clusterings have already been computed
+    for k in k_values:
+        for i in range(k):
+            if not os.path.exists(os.path.join(clusterings_dir_path, f'k_{k}', f'cluster_{i}.npy')):
+                return False
+    
+    # the clusterings already exist
+    return True
+
 def parse_args():
     """
     Parses command line arguments.
@@ -314,11 +427,12 @@ def parse_args():
     parser.add_argument('--verbose', action='store_true', help='Print training information during training')
     parser.add_argument('--save_best_params', action='store_true', help='Saves the best hyper parameters found in the optimization search')
     parser.add_argument('-k', '--k_values', type=int, nargs='+', default=[2, 3, 4], help='List of values of clustering sizes to be used for clustering. They must be integers greater than 1')
-    parser.add_argument('--gamma', type=float, default=1, help='Multiplicative parameter for the radius of the ball used to filter the outlier embeddings before clustering')
+    parser.add_argument('--gamma', type=float, default=1, help='Multiplicative parameter for the radius of the ball used to filter out outliers before clustering')
     parser.add_argument('--infinite_sites', action='store_true', help='If set, the infinite sites assumption is enabled for CloMu. This option must be included when considering the BreastCancer.npy dataset')
     parser.add_argument('--CloMu_epochs', type=int, default=500, help='Number of epochs for the training of CloMu on each cluster')
     parser.add_argument('--no_tuning', action='store_true', help='If set, our GNN-based model is not tuned before training. In this case, the best hyperparameters are set to default ones')
     parser.add_argument('--no_GNN', action='store_true', help='If set, our GNN-based model is not considered in the experiment. In this case, also the random baseline, which depends on the GNN-based clustering, is automatically not considered')
+    parser.add_argument('--no_tree_dist', action='store_true', help='If set, the tree distance clustering baseline is not considered in the experiment')
     parser.add_argument('--no_random', action='store_true', help='If set, the random baseline is not considered in the experiment')
     parser.add_argument('--no_CloMu_based', action='store_true', help='If set, the CloMu-based baseline is not considered in the experiment')
     parser.add_argument('--no_standard_CloMu', action='store_true', help='If set, the standard CloMu baseline is not considered in the experiment')
@@ -356,13 +470,15 @@ if __name__ == '__main__':
     test_set_path = os.path.join(args.datasets_dir, 'test_set.npy')
     train_test_path = os.path.join(args.datasets_dir, 'train_test.npy')
 
+    # compute the matrix with all distances among training trees if at least one of the models that use it are included in the experiment
+    train_distances = None
+    if not args.no_GNN or not args.no_tree_dist:
+        train_distances = GraphDistances.compute_distances(Utils.flatten_list_of_lists(train_data.to_dataset_DiGraphs()), GraphDistances.ancestor_descendant_dist).to(device)
+
     # ------------------------------------------------------ GNN-BASED MODEL ------------------------------------------------------
 
     # include our GNN-based model in the experiments only if not excluded by the user
     if not args.no_GNN:
-
-        # compute the tensor with the distances between all pairs of graphs in the training set
-        train_distances = GraphDistances.compute_distances(Utils.flatten_list_of_lists(train_data.to_dataset_DiGraphs()), GraphDistances.ancestor_descendant_dist).to(device)
 
         # path to the directory where to store all the results for the GNN-based model
         GNN_dir_path = os.path.join(args.datasets_dir, '..', 'GNN')
@@ -500,7 +616,7 @@ if __name__ == '__main__':
 
         # path to the directory where to store all the results for the random baseline
         random_dir_path = os.path.join(args.datasets_dir, '..', 'Random')
-        os.makedirs(random_dir_path, exist_ok=True)        
+        os.makedirs(random_dir_path, exist_ok=True)
 
         # print information
         print('\nClustering the training patients at random, but into clusters of the same sizes of those computed by our GNN-based model...\n')
@@ -526,7 +642,44 @@ if __name__ == '__main__':
                 'default',                                                                                    # regularize factor
                 args.CloMu_epochs                                                                             # number of training epochs
             )
-        
+
+    # ------------------------------------------------------ TREE DISTANCES BASELINE ------------------------------------------------------
+
+    # include the tree distance clustering baseline in the experiments only if this baseline is not excluded by the user
+    if not args.no_tree_dist:
+
+        # path to the directory where to store all the results for the baseline
+        tree_dist_dir_path = os.path.join(args.datasets_dir, '..', 'Tree_distances')
+        os.makedirs(tree_dist_dir_path, exist_ok=True)        
+
+        # print information
+        print('\nClustering the training patients at based on the true tree distances...\n')
+
+        # cluster the training set
+        clustering_labels = tree_distance_clustering(train_distances, args.k_values, args.gamma, tree_dist_dir_path)
+
+        # prepare the clustered training set to be fed to CloMu
+        create_cluster_data_for_CloMu(train_set_np, test_set_np, clustering_labels, tree_dist_dir_path)
+
+        # print information
+        print('\nTraining a different CloMu instance on each cluster in each clustering computed applying hierarchical clustering on the true tree distances...\n')
+
+        # train a CloMu model on each cluster of each clustering and compute probabilities also for test trees, saving all the results
+        for k in args.k_values:
+            Ensemble.train_on_clusters(
+                os.path.join(tree_dist_dir_path, f'k_{k}'),                                                         # path to the folder with clusters
+                os.path.join(tree_dist_dir_path, f'k_{k}'),                                                         # path to the folder where to save CloMu weights for the clusters
+                os.path.join(tree_dist_dir_path, f'k_{k}'),                                                         # path to the folder where to save CloMu probabilities for the clusters
+                os.path.join(tree_dist_dir_path, f'k_{k}'),                                                         # path to the folder where to save CloMu mutations for the clusters
+                test_set_path,                                                                                # path to the test set concatenated to all clusters
+                k,                                                                                            # number of clusters
+                'raw',                                                                                        # format of the input dataset
+                args.infinite_sites,                                                                          # whether the infinite sites assumption has to be enabled or not
+                args.max_tree_length,                                                                         # maximum length of a tree to be considered, otherwise it is removed            
+                'default',                                                                                    # regularize factor
+                args.CloMu_epochs                                                                             # number of training epochs
+            )
+    
     # ------------------------------------------------------ STANDARD CLOMU BASELINE ------------------------------------------------------
 
     # include the standard CloMu baseline in the experiments only if not excluded by the user
@@ -567,8 +720,17 @@ if __name__ == '__main__':
         # print information
         print('\nClustering training patients using the CloMu-based baseline...\n')
 
+        # path to the random clusterings
+        random_dir_path = os.path.join(args.datasets_dir, '..', 'Random')
+        os.makedirs(random_dir_path, exist_ok=True)
+
+        # compute the random clusterings only if they do not exist yet
+        if args.no_random:
+            if not check_random_clusterings(random_dir_path, args.k_values):        
+                random_clustering(train_set_np, test_set_np, args.k_values, GNN_dir_path, random_dir_path)
+        
         # compute and save clusterings of the training set for all input sizes
-        Baselines.balanced_CloMu_probabilities_clustering(train_set_path, CloMu_based_dir_path, args.k_values, test_set_np, args.infinite_sites, args.max_tree_length, args.CloMu_epochs)
+        Baselines.CloMu_probabilities_clustering(random_dir_path, CloMu_based_dir_path, args.k_values, train_set_np, test_set_np, args.infinite_sites, args.max_tree_length, args.CloMu_epochs)
 
         # print information
         print('\nTraining a different CloMu instance on each cluster in each clustering computed using CloMu-based baseline...\n')
@@ -649,7 +811,7 @@ if __name__ == '__main__':
         oncotree2vec_embeddings = oncotree2vec_embeddings.to_numpy()
 
         # cluster the embeddings for each input clustering size
-        clusterings_labels = cluster_oncotree2vec_embeddings(oncotree2vec_embeddings, args.k_values, oncotree2vec_dir_path)
+        clusterings_labels = cluster_oncotree2vec_embeddings(oncotree2vec_embeddings, args.k_values, args.gamma, oncotree2vec_dir_path)
 
         # prepare the clustered training set to be fed to CloMu
         create_cluster_data_for_CloMu(train_set_np, test_set_np, clusterings_labels, oncotree2vec_dir_path)
