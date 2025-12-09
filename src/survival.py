@@ -1628,9 +1628,9 @@ class Survival_Prediction:
         # rename the predictor names so to have them displayed better in the plot
         plot_df['Predictor'] = plot_df['Predictor'].replace(
             {
-                'Supervised GNN': 'CPhyT-\nGNN\nSuper',
-                'GNN SSVM': 'CPhyT-\nGNN\nUnsuper',
-                'GNN Complete SSVM': 'CPhyT-\nGNN\nUnsuper' + r'$*$',
+                'Supervised GNN': 'CPhyT-\nGNN\nSup',
+                'GNN SSVM': 'CPhyT-\nGNN\nUnsup',
+                'GNN Complete SSVM': 'CPhyT-\nGNN\nUnsup' + r'$*$',
                 'Alteration SSVM': 'Alteration\nEncoding',
                 'Clone SSVM': 'Clone\nEncoding',
                 'Concat SSVM': 'Concat\nEncoding',
@@ -1644,9 +1644,9 @@ class Survival_Prediction:
         # consider only the predictors of interest
         plot_df = plot_df[plot_df['Predictor'].isin([
             'Cluster\nEncoding\nK=3' + r'$*$',
-            'CPhyT-\nGNN\nSuper',
-            'CPhyT-\nGNN\nUnsuper',
-            'CPhyT-\nGNN\nUnsuper' + r'$*$',
+            'CPhyT-\nGNN\nSup',
+            'CPhyT-\nGNN\nUnsup',
+            'CPhyT-\nGNN\nUnsup' + r'$*$',
             'Alteration\nEncoding',
             'Clone\nEncoding',
             'Concat\nEncoding',
@@ -1713,9 +1713,9 @@ class Survival_Prediction:
         # rename the predictor names so to have them displayed better in the plot
         plot_df['Predictor'] = plot_df['Predictor'].replace(
             {
-                'Supervised GNN': 'CPhyT-\nGNN\nSuper',
-                'GNN SSVM': 'CPhyT-\nGNN\nUnsuper',
-                'GNN Complete SSVM': 'CPhyT-\nGNN\nUnsuper' + r'$*$',
+                'Supervised GNN': 'CPhyT-\nGNN\nSup',
+                'GNN SSVM': 'CPhyT-\nGNN\nUnsup',
+                'GNN Complete SSVM': 'CPhyT-\nGNN\nUnsup' + r'$*$',
                 'Alteration SSVM': 'Alteration\nEncoding',
                 'Clone SSVM': 'Clone\nEncoding',
                 'Concat SSVM': 'Concat\nEncoding',
@@ -1729,9 +1729,9 @@ class Survival_Prediction:
         # consider only the predictors of interest
         plot_df = plot_df[plot_df['Predictor'].isin([
             'Cluster\nEncoding\nK=3' + r'$*$',
-            'CPhyT-\nGNN\nSuper',
-            'CPhyT-\nGNN\nUnsuper',
-            'CPhyT-\nGNN\nUnsuper' + r'$*$',
+            'CPhyT-\nGNN\nSup',
+            'CPhyT-\nGNN\nUnsup',
+            'CPhyT-\nGNN\nUnsup' + r'$*$',
             'Alteration\nEncoding',
             'Clone\nEncoding',
             'Concat\nEncoding',
